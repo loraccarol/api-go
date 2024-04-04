@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 )
 
 type CurrencyResponse struct {
@@ -18,7 +20,32 @@ type CurrencyData struct {
 	Bid  string `json:"bid"`
 }
 
+type CurrencyCache struct {
+	sync.Mutex
+	Data      map[string]CurrencyData
+	ExpiresAt time.Time
+}
+
+var cache CurrencyCache
+
 func getCurrencyData() (usdValue, eurValue float64, err error) {
+	cache.Lock()
+	defer cache.Unlock()
+
+	if time.Now().Before(cache.ExpiresAt) {
+		usdValue, err = strconv.ParseFloat(cache.Data["USDBRL"].Bid, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("Erro ao converter valor de USD para float64: %v", err)
+		}
+
+		eurValue, err = strconv.ParseFloat(cache.Data["EURBRL"].Bid, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("Erro ao converter valor de EUR para float64: %v", err)
+		}
+
+		return usdValue, eurValue, nil
+	}
+
 	url := "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
 
 	response, err := http.Get(url)
@@ -32,6 +59,9 @@ func getCurrencyData() (usdValue, eurValue float64, err error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("Erro ao analisar a resposta JSON: %v", err)
 	}
+
+	cache.Data = data
+	cache.ExpiresAt = time.Now().Add(1 * time.Minute) // Cache por 1 minuto
 
 	usdValue, err = strconv.ParseFloat(data["USDBRL"].Bid, 64)
 	if err != nil {
@@ -86,11 +116,17 @@ func currencyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=60") // Cache por 60 segundos
 
 	json.NewEncoder(w).Encode(currencyResponse)
 }
 
 func main() {
+	cache = CurrencyCache{
+		Data:      make(map[string]CurrencyData),
+		ExpiresAt: time.Time{},
+	}
+
 	http.HandleFunc("/convertamoeda", currencyHandler)
 	http.ListenAndServe(":8123", nil)
 }
